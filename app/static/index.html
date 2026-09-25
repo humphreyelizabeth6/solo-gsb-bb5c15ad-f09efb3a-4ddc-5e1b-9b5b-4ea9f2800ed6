@@ -267,6 +267,62 @@
       </section>
 
       <section class="card">
+        <div class="card-head">
+          <h2>采样节拍稽核</h2>
+          <span class="muted small">只读 · 读取 events 表，不改写事件或故障结果</span>
+        </div>
+        <div class="muted small ledger-hint">
+          从已有通道选择<b>设备与指标</b>，输入 <b>UTC 半开时间范围</b> <code>[start, end)</code>、<b>预期采样周期</b>（秒）与
+          <b>允许偏差</b>（秒，必须严格小于半个周期）。以范围起点为锚点生成预期时刻 <code>start + k×周期</code>（&lt; end）；
+          仅将<b>范围内、偏差内</b>的实际事件归入其<b>最近</b>预期时刻，同一时刻最多计一次，其余事件列为偏拍 / 重复；
+          连续未命中的预期时刻合并为<b>缺采段</b>，给出每段首末预期时刻与缺采点数，并返回整体命中率。
+        </div>
+        <div class="ledger-form">
+          <label class="ledger-field">设备
+            <select id="audit-device"></select>
+          </label>
+          <label class="ledger-field">指标
+            <select id="audit-metric"></select>
+          </label>
+          <label class="ledger-field">起始（本机时区） <input type="datetime-local" id="audit-start" step="1" /></label>
+          <label class="ledger-field">结束（本机时区） <input type="datetime-local" id="audit-end" step="1" /></label>
+          <label class="ledger-field">采样周期（秒） <input id="audit-period" type="number" min="0" step="any" value="60" /></label>
+          <label class="ledger-field">允许偏差（秒，&lt; 半周期） <input id="audit-tolerance" type="number" min="0" step="any" value="5" /></label>
+          <button id="btn-audit-query" class="btn btn-small btn-primary">稽核</button>
+          <button id="btn-audit-fill" class="btn btn-small">填入当前筛选范围</button>
+        </div>
+        <div class="muted small">时间在本机时区输入、按 UTC 查询；偏差恰为半个周期不被接受（相邻预期时刻的归属存在歧义）。</div>
+        <div id="audit-summary" class="ledger-summary" hidden></div>
+        <div id="audit-missing-wrap" class="ledger-table-wrap" hidden>
+          <table class="data-table ledger-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>首预期时刻（UTC）</th>
+                <th>末预期时刻（UTC）</th>
+                <th>段跨度</th>
+                <th>缺采点数</th>
+              </tr>
+            </thead>
+            <tbody id="audit-missing-rows"></tbody>
+          </table>
+        </div>
+        <div id="audit-extra-wrap" class="audit-extra-wrap" hidden>
+          <details>
+            <summary class="muted small">未计入事件（偏拍 / 重复） <span id="audit-extra-count"></span></summary>
+            <div class="ledger-table-wrap">
+              <table class="data-table ledger-table">
+                <thead>
+                  <tr><th>事件时间（UTC）</th><th>原因</th></tr>
+                </thead>
+                <tbody id="audit-extra-rows"></tbody>
+              </table>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <section class="card">
         <div class="card-head"><h2>区间标注</h2><span id="anno-count" class="muted"></span></div>
         <div id="anno-list"></div>
       </section>

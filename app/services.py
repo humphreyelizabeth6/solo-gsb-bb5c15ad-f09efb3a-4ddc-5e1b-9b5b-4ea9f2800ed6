@@ -8,6 +8,7 @@ import time
 from collections import defaultdict
 
 from . import db
+from .audit import audit_cadence
 from .engine import (
     Condition,
     Event,
@@ -788,6 +789,69 @@ def query_fault_daily_ledger(
             "coverage": (total_fault_seconds / total_queried_seconds) if total_queried_seconds else 0.0,
         },
     }
+
+
+def query_sampling_audit(
+    device: str,
+    metric: str,
+    start: float,
+    end: float,
+    period_seconds: float,
+    tolerance_seconds: float,
+) -> dict:
+    """Read-only sampling-cadence audit for one existing channel.
+
+    Reads the channel's actual events from the ``events`` table inside the
+    half-open window ``[start, end)`` (events are a point set, so the closing
+    bound is exclusive just like the audit window) and reconciles them against
+    the expected beat grid anchored at ``start`` (see
+    :func:`app.audit.audit_cadence`).  Nothing is written: events, faults and
+    every other table are left untouched, and rule evaluation is never
+    triggered.
+
+    Raises ``KeyError`` when the (device, metric) channel has no events and
+    ``ValueError`` for an invalid window / period / tolerance.
+    """
+    device = device.strip()
+    metric = metric.strip()
+    if not device or not metric:
+        raise ValueError("device and metric are required")
+    start = float(start)
+    end = float(end)
+    if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+        raise ValueError("audit end must be greater than start (half-open [start, end))")
+
+    channel = db.query_one(
+        "SELECT COUNT(*) AS c, MIN(ts) AS min_ts, MAX(ts) AS max_ts FROM events"
+        " WHERE device = ? AND metric = ?",
+        (device, metric),
+    )
+    if channel is None or channel["c"] == 0:
+        raise KeyError(f"channel not found: {device}/{metric}")
+
+    rows = db.query(
+        "SELECT ts FROM events WHERE device = ? AND metric = ? AND ts >= ? AND ts < ?"
+        " ORDER BY ts, id",
+        (device, metric, start, end),
+    )
+    result = audit_cadence(
+        start,
+        end,
+        period_seconds,
+        tolerance_seconds,
+        (r["ts"] for r in rows),
+    )
+    payload = result.to_dict()
+    payload["device"] = device
+    payload["metric"] = metric
+    payload["channel"] = {
+        "device": device,
+        "metric": metric,
+        "event_count": channel["c"],
+        "min_ts": channel["min_ts"],
+        "max_ts": channel["max_ts"],
+    }
+    return payload
 
 
 def query_suppressed(

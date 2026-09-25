@@ -451,6 +451,48 @@ def get_fault_daily_ledger(
 
 
 # --------------------------------------------------------------------------- #
+# Sampling-cadence audit (read-only)
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/api/sampling-audit")
+def get_sampling_audit(
+    device: str = Query(..., min_length=1),
+    metric: str = Query(..., min_length=1),
+    start: str = Query(...),
+    end: str = Query(...),
+    period_seconds: float = Query(..., gt=0),
+    tolerance_seconds: float = Query(..., ge=0),
+) -> dict:
+    """Read-only sampling-cadence audit for one existing channel.
+
+    Expected sample instants are generated as ``start + k*period`` inside the
+    half-open window ``[start, end)`` (anchored at ``start``); actual events
+    of the channel within the window and within ``tolerance_seconds`` of their
+    nearest expected instant book that instant (one event per instant at most;
+    tolerance must be strictly below half a period).  Consecutive unbooked
+    instants are merged into missing-sample segments.  The audit reads the
+    stored events only — it never writes events or recomputes faults.
+    """
+    start_ts = parse_bound(start)
+    end_ts = parse_bound(end)
+    if start_ts is None or end_ts is None:
+        raise HTTPException(status_code=400, detail="start and end are required")
+    if not math.isfinite(period_seconds) or period_seconds <= 0:
+        raise HTTPException(status_code=400, detail="period_seconds must be a positive finite number of seconds")
+    if not math.isfinite(tolerance_seconds) or tolerance_seconds < 0:
+        raise HTTPException(status_code=400, detail="tolerance_seconds must be a finite non-negative number of seconds")
+    try:
+        return services.query_sampling_audit(
+            device, metric, start_ts, end_ts, period_seconds, tolerance_seconds
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc).strip("'")) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# --------------------------------------------------------------------------- #
 # Annotations
 # --------------------------------------------------------------------------- #
 
