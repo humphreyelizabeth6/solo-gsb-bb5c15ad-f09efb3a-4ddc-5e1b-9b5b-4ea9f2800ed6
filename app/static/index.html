@@ -267,6 +267,52 @@
       </section>
 
       <section class="card">
+        <div class="card-head">
+          <h2>采样节拍稽核</h2>
+          <span class="muted small">只读 · 仅读取现有 events，不改写事件或故障结果</span>
+        </div>
+        <div class="muted small ledger-hint">
+          从现有通道选择<b>设备 + 指标</b>，给出 UTC 半开稽核范围 <code>[start, end)</code>、<b>预期采样周期</b>（秒）与
+          <b>允许偏差</b>（秒，须 &lt; 半个周期）。以范围起点为锚点生成范围内的预期时刻
+          <code>start + k×周期</code>；只有落在范围内、且与<b>最近预期时刻</b>的偏差不超过允许偏差的实际事件才计入，
+          <b>同一预期时刻最多计一次</b>（多余的合拍事件只统计、不重复命中）。连续未命中的预期时刻合并为<b>缺采段</b>，
+          给出每段首末预期时刻与缺采点数，并汇总整体命中率。
+        </div>
+        <div class="ledger-controls">
+          <div class="ledger-form">
+            <label class="ledger-field">设备
+              <select id="audit-device"></select>
+            </label>
+            <label class="ledger-field">指标
+              <select id="audit-metric"></select>
+            </label>
+            <label class="ledger-field">起始（本机时区） <input type="datetime-local" id="audit-start" step="1" /></label>
+            <label class="ledger-field">结束（本机时区） <input type="datetime-local" id="audit-end" step="1" /></label>
+            <label class="ledger-field">预期周期(秒) <input type="number" id="audit-period" min="0" step="any" value="60" /></label>
+            <label class="ledger-field">允许偏差(秒，&lt;半周期) <input type="number" id="audit-tolerance" min="0" step="any" value="5" /></label>
+            <button id="btn-audit-query" class="btn btn-small btn-primary">稽核</button>
+            <button id="btn-audit-fill" class="btn btn-small">填入当前筛选范围</button>
+          </div>
+          <div class="muted small">时间在本机时区输入、按 UTC 稽核；半开范围包含起点、不包含结束。</div>
+        </div>
+        <div id="audit-summary" class="ledger-summary" hidden></div>
+        <div id="audit-gap-wrap" class="ledger-table-wrap" hidden>
+          <table class="data-table ledger-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>首个缺失预期时刻</th>
+                <th>末个缺失预期时刻</th>
+                <th>缺采点数</th>
+                <th>持续跨度</th>
+              </tr>
+            </thead>
+            <tbody id="audit-gap-rows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
         <div class="card-head"><h2>区间标注</h2><span id="anno-count" class="muted"></span></div>
         <div id="anno-list"></div>
       </section>

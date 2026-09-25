@@ -451,6 +451,53 @@ def get_fault_daily_ledger(
 
 
 # --------------------------------------------------------------------------- #
+# Sampling-cadence audit (read-only)
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/api/sampling-audit")
+def get_sampling_audit(
+    device: str = Query(..., min_length=1),
+    metric: str = Query(..., min_length=1),
+    start: str = Query(...),
+    end: str = Query(...),
+    period_seconds: float = Query(..., alias="period"),
+    tolerance_seconds: float = Query(..., alias="tolerance"),
+) -> dict:
+    """Read-only sampling-cadence (beat) audit for one existing channel.
+
+    The user picks a device + metric that already has events and gives a
+    half-open UTC window ``[start, end)``, the expected sampling period and
+    an allowed deviation strictly smaller than half a period.  Expected
+    instants are generated from the range start as anchor; only in-range
+    events within tolerance are attributed to their nearest expected
+    instant (each instant at most once).  Consecutive missed instants are
+    merged into 缺采段, and the response reports each gap's first/last
+    expected instant, the missed-point count and the overall hit rate.
+
+    The audit reads the stored ``events`` table only — it never inserts or
+    rewrites events, and never re-evaluates or rewrites fault results.
+    """
+    start_ts = parse_bound(start)
+    end_ts = parse_bound(end)
+    if start_ts is None or end_ts is None:
+        raise HTTPException(status_code=400, detail="start and end are required")
+    try:
+        return services.query_cadence_audit(
+            device.strip(),
+            metric.strip(),
+            start_ts,
+            end_ts,
+            period_seconds,
+            tolerance_seconds,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc).strip("'")) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# --------------------------------------------------------------------------- #
 # Annotations
 # --------------------------------------------------------------------------- #
 

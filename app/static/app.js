@@ -30,6 +30,7 @@ const state = {
   brush: null,
   ledgerSelected: new Set(),
   ledgerResult: null,
+  auditResult: null,
   imports: [],
 };
 
@@ -1327,6 +1328,117 @@ function renderLedger() {
   wrap.hidden = false;
 }
 
+/* ----------------------------- sampling cadence audit ----------------------------- */
+
+// Build the device -> metrics options from the existing channels so the
+// audit can only target channels that currently hold events.
+function renderAuditSelectors() {
+  const devSelect = $("audit-device");
+  const metSelect = $("audit-metric");
+  const prevDevice = devSelect.value;
+  const prevMetric = metSelect.value;
+
+  const byDevice = new Map();
+  state.channels.forEach((c) => {
+    if (!byDevice.has(c.device)) byDevice.set(c.device, []);
+    byDevice.get(c.device).push(c.metric);
+  });
+  const devices = [...byDevice.keys()].sort();
+
+  devSelect.innerHTML = devices.length
+    ? devices.map((d) => `<option value="${esc(d)}">${esc(d)}</option>`).join("")
+    : "";
+  if (devices.includes(prevDevice)) devSelect.value = prevDevice;
+
+  const fillMetrics = () => {
+    const metrics = (byDevice.get(devSelect.value) || []).slice().sort();
+    const cur = metSelect.value;
+    metSelect.innerHTML = metrics.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("");
+    if (metrics.includes(cur)) metSelect.value = cur;
+  };
+  fillMetrics();
+  devSelect.onchange = fillMetrics;
+}
+
+function fillAuditRange() {
+  ensureView();
+  if (typeof state.viewStart === "number" && isFinite(state.viewStart)) {
+    $("audit-start").value = toLocalInput(state.viewStart);
+  }
+  if (typeof state.viewEnd === "number" && isFinite(state.viewEnd)) {
+    $("audit-end").value = toLocalInput(state.viewEnd);
+  }
+}
+
+async function runAudit() {
+  const device = $("audit-device").value;
+  const metric = $("audit-metric").value;
+  if (!device || !metric) { toast("请选择现有通道（设备 + 指标）", true); return; }
+  const s = fromLocalInput($("audit-start").value);
+  const e = fromLocalInput($("audit-end").value);
+  if (s === null || e === null || e <= s) { toast("请填写有效的起始/结束时间（半开范围，结束须晚于起始）", true); return; }
+  const period = Number($("audit-period").value);
+  const tolerance = Number($("audit-tolerance").value);
+  if (!Number.isFinite(period) || period <= 0) { toast("预期采样周期必须为正秒数", true); return; }
+  if (!Number.isFinite(tolerance) || tolerance < 0) { toast("允许偏差必须为非负秒数", true); return; }
+  if (tolerance >= period / 2) { toast("允许偏差必须小于半个采样周期", true); return; }
+
+  const params = new URLSearchParams({
+    device, metric, start: s, end: e, period, tolerance,
+  });
+  const btn = $("btn-audit-query");
+  btn.disabled = true;
+  try {
+    state.auditResult = await api(`/api/sampling-audit?${params}`);
+    renderAudit();
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderAudit() {
+  const r = state.auditResult;
+  const summary = $("audit-summary");
+  const wrap = $("audit-gap-wrap");
+  if (!r) {
+    summary.hidden = true;
+    wrap.hidden = true;
+    return;
+  }
+  summary.hidden = false;
+  const surplus = r.events_unassigned
+    ? `<span class="tag" style="background:#fffbeb;border-color:#fde68a;color:#92400e">合拍多余事件 ${r.events_unassigned}（不重复命中）</span>`
+    : "";
+  summary.innerHTML = `
+    <div class="ledger-line"><b>稽核通道：</b><span class="tag">${esc(r.device)}/${esc(r.metric)}</span>
+      <span class="muted small">锚点（范围起点）${fmtTime(r.anchor)}</span></div>
+    <div class="ledger-line"><b>稽核范围（UTC，半开）：</b>${fmtTime(r.start)} → ${fmtTime(r.end)}
+      （共 ${fmtDur(r.end - r.start)}）· 预期周期 ${r.period_seconds}s · 允许偏差 ±${r.tolerance_seconds}s</div>
+    <div class="ledger-line"><b>预期时刻 ${r.expected_count}</b> ·
+      <span style="color:#15803d">命中 ${r.hit_count}</span> ·
+      <span style="color:#991b1b">缺采 ${r.miss_count}</span> ·
+      <b>整体命中率 ${fmtPct(r.hit_rate)}</b></div>
+    <div class="ledger-line muted small">范围内实际事件 ${r.events_in_range} · 其中偏差内（候选） ${r.events_tolerated} ${surplus}</div>`;
+
+  const tbody = $("audit-gap-rows");
+  if (!r.gaps.length) {
+    wrap.hidden = false;
+    tbody.innerHTML = `<tr><td colspan="5" class="empty">无缺采：每个预期时刻都有一个偏差内事件命中。</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = r.gaps.map((g, i) => `
+    <tr>
+      <td>${i + 1}</td>
+      <td>${fmtTime(g.start)}</td>
+      <td>${fmtTime(g.end)}</td>
+      <td>${g.missed}</td>
+      <td>${fmtDur(g.end - g.start)}</td>
+    </tr>`).join("");
+  wrap.hidden = false;
+}
+
 /* ----------------------------- annotations ----------------------------- */
 
 function renderAnnotations() {
@@ -1503,12 +1615,15 @@ async function reloadAll() {
   renderMaintenance();
   renderTtls();
   renderLedgerRules();
+  renderAuditSelectors();
   if (!$("ledger-start").value || !$("ledger-end").value) fillLedgerRange();
+  if (!$("audit-start").value || !$("audit-end").value) fillAuditRange();
   syncFilterInputs();
   state.eventOffset = 0;
   await loadEvents(false);
   await loadImportBatches();
   updateStatus();
+  renderAudit();
 }
 
 async function refreshAfterRuleChange() {
@@ -1688,6 +1803,9 @@ function bind() {
     renderLedgerRules();
   });
   $("btn-ledger-fill").addEventListener("click", fillLedgerRange);
+
+  $("btn-audit-query").addEventListener("click", runAudit);
+  $("btn-audit-fill").addEventListener("click", fillAuditRange);
 
   $("brush-save").addEventListener("click", saveBrush);
   $("brush-cancel").addEventListener("click", () => { $("brush-pop").hidden = true; state.brush = null; });

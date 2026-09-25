@@ -839,3 +839,222 @@ def daily_fault_ledger(
         )
         day0 = day1
     return days
+
+
+# --------------------------------------------------------------------------- #
+# Sampling-cadence audit (read-only beat/miss check against stored events)
+# --------------------------------------------------------------------------- #
+
+# Upper bound on how many expected instants a single audit may generate;
+# protects the read-only endpoint from absurd period/range combinations.
+MAX_CADENCE_SLOTS = 200_000
+
+
+def expected_sample_times(start: float, period: float, end: float) -> list[float]:
+    """Expected sampling instants inside the half-open window ``[start, end)``.
+
+    The range start is the anchor: instants are ``start + k*period`` for
+    ``k = 0, 1, ...`` while the instant is strictly smaller than ``end``.
+    """
+    start = float(start)
+    end = float(end)
+    period = float(period)
+    if end <= start:
+        raise ValueError("audit end must be greater than start")
+    if not math.isfinite(period) or period <= 0:
+        raise ValueError("sampling period must be a finite positive number of seconds")
+    # Count first (floor of the open bound), then materialize; the count is
+    # capped so the audit stays a bounded read-only computation.
+    count = math.ceil((end - start) / period - _EPS)
+    if count < 1:
+        count = 1
+    if count > MAX_CADENCE_SLOTS:
+        raise ValueError(
+            f"too many expected instants ({count}); widen the period or narrow the range"
+            f" (max {MAX_CADENCE_SLOTS})"
+        )
+    return [start + k * period for k in range(count)]
+
+
+@dataclass(frozen=True)
+class CadenceHit:
+    """One expected instant satisfied by an actual event."""
+
+    expected_ts: float
+    event_id: int
+    event_ts: float
+    deviation: float  # signed seconds: event_ts - expected_ts (negative = early)
+
+
+@dataclass(frozen=True)
+class CadenceGap:
+    """One run of consecutive missed expected instants."""
+
+    start: float  # first missed expected instant
+    end: float  # last missed expected instant
+    missed: int  # number of missed expected instants in the run
+
+
+@dataclass(frozen=True)
+class CadenceAuditResult:
+    anchor: float
+    start: float
+    end: float
+    period: float
+    tolerance: float
+    expected_times: list[float]
+    hits: list[CadenceHit]
+    events_in_range: int
+    events_tolerated: int
+    events_unassigned: int
+
+    @property
+    def expected_count(self) -> int:
+        return len(self.expected_times)
+
+    @property
+    def hit_count(self) -> int:
+        return len(self.hits)
+
+    @property
+    def miss_count(self) -> int:
+        return self.expected_count - self.hit_count
+
+    @property
+    def hit_rate(self) -> float:
+        return self.hit_count / self.expected_count if self.expected_count else 0.0
+
+    def gaps(self) -> list[CadenceGap]:
+        """Merge consecutive missed expected instants into 缺采段.
+
+        The hit set is keyed by slot index; adjacent unhit indices form one
+        gap spanning the first through the last missed expected instant.
+        """
+        hit_slots = {
+            round((h.expected_ts - self.anchor) / self.period) for h in self.hits
+        }
+        gaps: list[CadenceGap] = []
+        run_start: int | None = None
+        for k, ts in enumerate(self.expected_times):
+            if k not in hit_slots:
+                if run_start is None:
+                    run_start = k
+                run_end = k
+            elif run_start is not None:
+                gaps.append(
+                    CadenceGap(self.expected_times[run_start], self.expected_times[run_end], run_end - run_start + 1)
+                )
+                run_start = None
+        if run_start is not None:
+            gaps.append(
+                CadenceGap(self.expected_times[run_start], self.expected_times[run_end], run_end - run_start + 1)
+            )
+        return gaps
+
+    def to_dict(self, include_hits: bool = False) -> dict:
+        payload = {
+            "anchor": self.anchor,
+            "start": self.start,
+            "end": self.end,
+            "period_seconds": self.period,
+            "tolerance_seconds": self.tolerance,
+            "expected_count": self.expected_count,
+            "hit_count": self.hit_count,
+            "miss_count": self.miss_count,
+            "hit_rate": self.hit_rate,
+            "events_in_range": self.events_in_range,
+            "events_tolerated": self.events_tolerated,
+            "events_unassigned": self.events_unassigned,
+            "gaps": [
+                {"start": g.start, "end": g.end, "missed": g.missed}
+                for g in self.gaps()
+            ],
+        }
+        if include_hits:
+            payload["hits"] = [
+                {
+                    "expected_ts": h.expected_ts,
+                    "event_id": h.event_id,
+                    "event_ts": h.event_ts,
+                    "deviation": h.deviation,
+                }
+                for h in self.hits
+            ]
+        return payload
+
+
+def cadence_audit(
+    events: Iterable[tuple[float, int]],
+    start: float,
+    end: float,
+    period: float,
+    tolerance: float,
+) -> CadenceAuditResult:
+    """Audit one channel's actual samples against an expected sampling beat.
+
+    Expected instants are :func:`expected_sample_times` anchored at *start*
+    over the half-open window ``[start, end)``.  Only actual events inside
+    the window whose distance to their **nearest** expected instant is at
+    most *tolerance* seconds are eligible; *tolerance* must be strictly
+    smaller than half a *period* (so every event has one unambiguous
+    nearest instant).  Each expected instant counts at most once: eligible
+    events are assigned closest-first, and a surplus event within tolerance
+    of an already-satisfied instant is counted as ``events_unassigned``
+    (never credited a second time).  Consecutive unhit instants merge into
+    缺采段 (see :meth:`CadenceAuditResult.gaps`).
+
+    ``events`` is an iterable of ``(ts, event_id)`` pairs; ordering is
+    irrelevant and pairs outside the window are ignored.
+    """
+    start = float(start)
+    end = float(end)
+    period = float(period)
+    tolerance = float(tolerance)
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise ValueError("tolerance must be a finite non-negative number of seconds")
+    if tolerance >= period / 2.0 - _EPS:
+        raise ValueError("tolerance must be smaller than half the sampling period")
+    expected = expected_sample_times(start, period, end)
+
+    in_range: list[tuple[float, int]] = []
+    for ts, event_id in events:
+        ts = float(ts)
+        if start <= ts < end:
+            in_range.append((ts, int(event_id)))
+
+    # Closest events claim their nearest instant first; ties fall back to the
+    # earlier (then smaller-id) event so the assignment is deterministic.
+    candidates: list[tuple[float, float, int, int]] = []
+    for ts, event_id in in_range:
+        k = int(round((ts - start) / period))
+        if k < 0 or k >= len(expected):
+            continue
+        deviation = ts - expected[k]
+        if abs(deviation) <= tolerance + _EPS:
+            candidates.append((abs(deviation), ts, event_id, k))
+    candidates.sort(key=lambda c: (c[0], c[1], c[2]))
+
+    assigned: dict[int, CadenceHit] = {}
+    unassigned = 0
+    for abs_dev, ts, event_id, k in candidates:
+        existing = assigned.get(k)
+        if existing is None:
+            assigned[k] = CadenceHit(expected[k], event_id, ts, ts - expected[k])
+        elif existing.event_ts != ts or existing.event_id != event_id:
+            # Same instant already credited; this extra in-tolerance event
+            # does not count as a hit.
+            unassigned += 1
+
+    hits = [assigned[k] for k in sorted(assigned)]
+    return CadenceAuditResult(
+        anchor=start,
+        start=start,
+        end=end,
+        period=period,
+        tolerance=tolerance,
+        expected_times=expected,
+        hits=hits,
+        events_in_range=len(in_range),
+        events_tolerated=len(candidates),
+        events_unassigned=unassigned,
+    )

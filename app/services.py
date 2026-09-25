@@ -13,6 +13,7 @@ from .engine import (
     Event,
     Interval,
     MaintenanceWindow,
+    cadence_audit,
     cluster_intervals,
     daily_fault_ledger,
     diff_faults,
@@ -788,6 +789,73 @@ def query_fault_daily_ledger(
             "coverage": (total_fault_seconds / total_queried_seconds) if total_queried_seconds else 0.0,
         },
     }
+
+
+def query_cadence_audit(
+    device: str,
+    metric: str,
+    start: float,
+    end: float,
+    period: float,
+    tolerance: float,
+) -> dict:
+    """Read-only sampling-cadence audit for one existing channel.
+
+    Selects device + metric from the existing channels (i.e. channels that
+    currently hold events), then reads that channel's stored ``events`` —
+    never writing anything and never touching the fault tables — and audits
+    the actual samples against the expected beat produced by
+    :func:`app.engine.cadence_audit` over the half-open UTC window
+    ``[start, end)`` anchored at *start*.
+
+    Parameters mirror the page form:
+    * *period* — expected sampling period in positive, finite seconds;
+    * *tolerance* — allowed deviation, finite and strictly smaller than half
+      a period (otherwise an event could be equidistant from two instants).
+
+    The response carries the expected/hit/miss counts, the overall hit rate
+    and the merged 缺采段 (first/last missed expected instant + missed
+    points per run).
+
+    Raises ``KeyError`` for an unknown channel and ``ValueError`` for an
+    empty/inverted window or invalid period/tolerance.
+    """
+    device = str(device).strip()
+    metric = str(metric).strip()
+    if not device or not metric:
+        raise ValueError("device and metric are required")
+    start = float(start)
+    end = float(end)
+    period = float(period)
+    tolerance = float(tolerance)
+    if end <= start:
+        raise ValueError("audit end must be greater than start (half-open [start, end))")
+    if not math.isfinite(period) or period <= 0:
+        raise ValueError("period_seconds must be a finite positive number of seconds")
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise ValueError("tolerance_seconds must be a finite non-negative number of seconds")
+    if tolerance >= period / 2.0:
+        raise ValueError("tolerance_seconds must be smaller than half the sampling period")
+
+    channel = db.query_one(
+        "SELECT COUNT(*) AS c FROM events WHERE device = ? AND metric = ?",
+        (device, metric),
+    )
+    if channel is None or channel["c"] == 0:
+        raise KeyError(f"channel not found: {device}/{metric}")
+
+    rows = db.query(
+        "SELECT id, ts FROM events WHERE device = ? AND metric = ? AND ts >= ? AND ts < ?"
+        " ORDER BY ts, id",
+        (device, metric, start, end),
+    )
+    result = cadence_audit(
+        ((r["ts"], r["id"]) for r in rows), start, end, period, tolerance
+    )
+    payload = result.to_dict()
+    payload["device"] = device
+    payload["metric"] = metric
+    return payload
 
 
 def query_suppressed(
